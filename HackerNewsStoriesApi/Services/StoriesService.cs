@@ -9,13 +9,11 @@ namespace HackerNewsStoriesApi.Services
         private static readonly HttpClient _httpClient = new HttpClient();
         private static readonly TimedLock _lock = new TimedLock();
 
-        private static IList<BestStoryItem>? _stories;
-        private static DateTime _fetchTime = DateTime.Now;
-
+        private static IList<StoryItem>? Stories;
+        private static DateTime FetchTime = DateTime.Now;
 
         private readonly int MaxDegreeOfParallelism;
         private readonly int MaxCacheTimeInSecs;
-
 
         public StoriesService(IConfiguration configuration)
         {
@@ -30,41 +28,48 @@ namespace HackerNewsStoriesApi.Services
             }
         }
 
-        public async Task<IEnumerable<BestStoryItem>> GetBestStories(int number)
+        public async Task<IEnumerable<StoryItem>> GetBestStories(int number)
         {
-            if (_stories == null || (DateTime.Now - _fetchTime).TotalSeconds > MaxCacheTimeInSecs)
+            // check if we have an up to date stories cached. Otherwise. Fetch all
+            if (Stories == null || (DateTime.Now - FetchTime).TotalSeconds > MaxCacheTimeInSecs)
             {
-                using (_lock.Lock(TimeSpan.FromSeconds(MaxCacheTimeInSecs * 2)))
+                // ensure concurent calls handled correctly
+                using (await _lock.Lock(TimeSpan.FromSeconds(MaxCacheTimeInSecs * 2)))
                 {
-                    if (_stories == null || (DateTime.Now - _fetchTime).TotalSeconds > MaxCacheTimeInSecs)
+                    if (Stories == null || (DateTime.Now - FetchTime).TotalSeconds > MaxCacheTimeInSecs)
                     {
-                        _stories = await FetchAllBestStories();
-                        _fetchTime = DateTime.Now;
+                        Stories = await FetchAllBestStories();
+                        FetchTime = DateTime.Now;
                     }
                 }
             }
 
-            return _stories.Take(number);
+            return Stories.Take(number);
         }
 
-        private async Task<IList<BestStoryItem>> FetchAllBestStories()
+        private async Task<IList<StoryItem>> FetchAllBestStories()
         {
+            // get list of stories
             using var response = await _httpClient.GetAsync("https://hacker-news.firebaseio.com/v0/beststories.json");
             response.EnsureSuccessStatusCode();
             var storiesIds = JsonSerializer.Deserialize<int[]>(await response.Content.ReadAsStringAsync());
 
-            var bestStories = new List<BestStoryItem>(storiesIds.Length);
+            var bestStories = new List<StoryItem>(storiesIds.Length);
 
-            await Parallel.ForEachAsync(storiesIds, new ParallelOptions { MaxDegreeOfParallelism = MaxDegreeOfParallelism },
-                async (storyId, c) => bestStories.Add(await GetStory(storyId)));
+            // get story details parallely with limits 
+            await Parallel.ForEachAsync(
+                storiesIds,
+                new ParallelOptions { MaxDegreeOfParallelism = MaxDegreeOfParallelism },
+                async (storyId, c) => bestStories.Add(await GetStory(storyId))
+            );
 
-
+            // sort descending by score
             bestStories.Sort((x, y) => y.Score.CompareTo(x.Score));
 
             return bestStories;
         }
 
-        private DateTime UnixTimeStampToDateTime(double unixTimeStamp)
+        private DateTime FromUnixTimeStamp(double unixTimeStamp)
         {
             // Unix timestamp is seconds past epoch
             DateTime dateTime = new DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
@@ -72,20 +77,20 @@ namespace HackerNewsStoriesApi.Services
             return dateTime;
         }
 
-        private async Task<BestStoryItem> GetStory(int storyId)
+        private async Task<StoryItem> GetStory(int storyId)
         {
             using var response = await _httpClient.GetAsync($"https://hacker-news.firebaseio.com/v0/item/{storyId}.json");
             response.EnsureSuccessStatusCode();
             var story = JsonSerializer.Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync());
 
-            return new BestStoryItem
+            return new StoryItem
             {
                 Title = story["title"]?.ToString(),
                 PostedBy = story["by"]?.ToString(),
                 CommentsCount = int.Parse(story["descendants"].ToString()),
                 Score = int.Parse(story["score"].ToString()),
                 Uri = story.ContainsKey("url") ? story["url"].ToString() : null,
-                Time = UnixTimeStampToDateTime(double.Parse(story["time"].ToString()))
+                Time = FromUnixTimeStamp(double.Parse(story["time"].ToString()))
             };
 
         }

@@ -24,7 +24,7 @@ namespace HackerNewsStoriesApi.Controllers
         }
 
         [HttpGet("best/{count}")]
-        public async Task<ActionResult<BestStoryItem[]>> GetBestStories(int count)
+        public async Task<ActionResult<StoryItem[]>> GetBestStories(int count)
         {
             if (count < 1 || count > _maxBestStories)
             {
